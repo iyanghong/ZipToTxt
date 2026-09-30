@@ -1,0 +1,30 @@
+ARG BASE_IMAGE=ubuntu:22.04
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG UBUNTU_MIRROR=http://archive.ubuntu.com/ubuntu
+RUN sed -i "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g; s|http://security.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" /etc/apt/sources.list \
+    && sed -i '/APT::Update::Post-Invoke/d' /etc/apt/apt.conf.d/docker-clean
+RUN apt-get update && apt-get install -y --no-install-recommends wine xvfb xauth wget ca-certificates python3-pip
+RUN python3 -m pip download --only-binary=:all: --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 \
+    --dest /tmp/windows-wheels cryptography pyinstaller pefile pywin32-ctypes
+RUN useradd -m builder && chown -R builder:builder /tmp/windows-wheels
+
+USER builder
+WORKDIR /home/builder
+ENV WINEARCH=win64 WINEPREFIX=/home/builder/.wine WINEDEBUG=-all
+RUN xvfb-run -a wineboot --init
+RUN xvfb-run -a winecfg -v win10
+RUN wget -q https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.zip -O python.zip \
+    && python3 -m zipfile -e python.zip /home/builder/.wine/drive_c/Python313 \
+    && rm python.zip
+# Wine 6 lacks CopyFile2; Python falls back to the regular copy path during the build.
+RUN sed -i 's/if hasattr(_winapi, "CopyFile2"):/if False:/' /home/builder/.wine/drive_c/Python313/Lib/shutil.py
+RUN xvfb-run -a wine /home/builder/.wine/drive_c/Python313/python.exe -m ensurepip --upgrade
+RUN xvfb-run -a wine /home/builder/.wine/drive_c/Python313/python.exe -m pip install \
+    --no-index --find-links=Z:\\tmp\\windows-wheels cryptography pyinstaller
+
+WORKDIR /home/builder/src
+COPY --chown=builder:builder zip_to_txt.py zip_to_txt_gui.py ./
+RUN xvfb-run -a wine /home/builder/.wine/drive_c/Python313/python.exe -m PyInstaller \
+    --onefile --windowed --name ZipToTxt zip_to_txt_gui.py

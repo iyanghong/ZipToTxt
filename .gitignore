@@ -1,0 +1,26 @@
+# Python 与本地环境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# PyInstaller 构建中间文件
+build/
+dist/
+*.spec
+
+# 本程序生成的本地数据
+*.txtparts/
+restored/
+.ztxt-*/
+
+# 发布产物上传到 GitHub Releases
+/release/
+
+# 操作系统与编辑器缓存
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
