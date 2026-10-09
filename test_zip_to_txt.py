@@ -104,13 +104,13 @@ def run() -> None:
             assert max(part.stat().st_size for part in default_parts.glob("*.txt")) == 50_000_000
             default_restored = zip_to_txt.decrypt_path(default_parts, "测试密码")
             with large_source.open("rb") as original, (default_restored / large_source.name).open("rb") as restored:
-                assert hashlib.file_digest(original, "sha256").digest() == hashlib.file_digest(restored, "sha256").digest()
+                assert hashlib.sha256(original.read()).digest() == hashlib.sha256(restored.read()).digest()
             large_parts = zip_to_txt.encrypt_path(large_source, "测试密码", part_size_mb=100)
             assert len(list(large_parts.glob("*.txt"))) == 1
             assert 50_000_000 < (large_parts / "part-000001.txt").stat().st_size <= 100_000_000
             large_restored = zip_to_txt.decrypt_path(large_parts, "测试密码")
             with large_source.open("rb") as original, (large_restored / large_source.name).open("rb") as restored:
-                assert hashlib.file_digest(original, "sha256").digest() == hashlib.file_digest(restored, "sha256").digest()
+                assert hashlib.sha256(original.read()).digest() == hashlib.sha256(restored.read()).digest()
 
             invalid_source = root / "非法大小.bin"
             invalid_source.write_bytes(b"test")

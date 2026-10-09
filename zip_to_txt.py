@@ -14,7 +14,8 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Callable
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 try:
     from cryptography.exceptions import InvalidTag
@@ -30,10 +31,25 @@ TEXT_LIMIT = DEFAULT_PART_SIZE_MB * 1_000_000  # MB 按十进制字节计算
 MAX_TEXT_LIMIT = MAX_PART_SIZE_MB * 1_000_000
 HEADER = struct.Struct(">5s16s8sII")
 MAGIC = b"ZTXT1"
+COPY_CHUNK_SIZE = 1024 * 1024
 INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
     f"{kind}{number}" for kind in ("COM", "LPT") for number in range(1, 10)
 }
+
+
+@dataclass(frozen=True)
+class Progress:
+    phase: str
+    processed: int
+    total: int | None
+    filename: str = ""
+    finished: bool = False
+
+
+def report(callback, phase, processed, total, filename="", *, finished=False):
+    if callback:
+        callback(Progress(phase, processed, total, filename, finished))
 
 
 def key_from_password(password: str, salt: bytes) -> bytes:
@@ -74,38 +90,110 @@ def check_names(names: list[str]) -> None:
         seen.add(folded)
 
 
-def make_zip(source: Path, zip_path: Path) -> None:
-    with zipfile.ZipFile(
-        zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True, strict_timestamps=False
-    ) as archive:
-        if source.is_file():
-            check_names([source.name])
-            archive.write(source, source.name)
-            return
-        check_names([source.name])
+def inspect_files(source: Path, files: list[str]) -> tuple[list[str], list[str]]:
+    """校验指定的相对文件路径，区分当前存在和已缺失的文件。"""
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("文件清单的输入路径必须是普通目录")
+    available, missing = [], []
+    children: dict[str, set[str]] = {}
+    check_names([source.name])
+    for name in sorted(set(files)):
+        relative = PurePosixPath(name)
+        if (relative.is_absolute() or not relative.parts
+                or any(part in {"", ".", ".."} for part in name.split("/"))):
+            raise ValueError(f"文件清单包含不安全路径：{name!r}")
+        item = source
+        absent = False
+        for index, part in enumerate(relative.parts):
+            check_names([part])
+            item = item / part
+            try:
+                mode = item.lstat().st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                absent = True
+                break
+            if stat.S_ISLNK(mode):
+                raise ValueError(f"不支持符号链接：{item}")
+            final = index == len(relative.parts) - 1
+            if not (stat.S_ISREG(mode) if final else stat.S_ISDIR(mode)):
+                raise ValueError(f"不支持目录、子模块或特殊文件：{item}")
+        if absent:
+            missing.append(name)
+            continue
+        for depth, part in enumerate(relative.parts):
+            children.setdefault("/".join(relative.parts[:depth]), set()).add(part)
+        available.append(name)
+    for names in children.values():
+        check_names(list(names))
+    return available, missing
 
+
+def make_zip(source: Path, zip_path: Path, files: list[str] | None = None, *, on_progress=None) -> None:
+    report(on_progress, "扫描文件", 0, None)
+    entries = []
+    check_names([source.name])
+    if files is not None:
+        available, missing = inspect_files(source, files)
+        if missing:
+            raise ValueError("文件清单已变化，请重新预览：" + "、".join(missing[:5]))
+        if not available:
+            raise ValueError("没有可打包文件")
+        entries.append((None, source.name + "/", 0))
+        for name in available:
+            entries.append((source / name, source.name + "/" + name, (source / name).stat().st_size))
+    elif source.is_file():
+        entries.append((source, source.name, source.stat().st_size))
+    else:
         def fail_walk(error: OSError) -> None:
             raise error
 
-        for root, dirs, files in os.walk(source, onerror=fail_walk, followlinks=False):
+        for root, dirs, names in os.walk(source, onerror=fail_walk, followlinks=False):
             dirs.sort()
-            files.sort()
-            check_names(dirs + files)
-            for name in dirs + files:
+            names.sort()
+            check_names(dirs + names)
+            for name in dirs + names:
                 item = Path(root) / name
                 if item.is_symlink() or not (item.is_dir() or item.is_file()):
                     raise ValueError(f"不支持符号链接或特殊文件：{item}")
             relative = Path(root).relative_to(source.parent).as_posix()
-            archive.writestr(relative + "/", b"")
-            for name in files:
+            entries.append((None, relative + "/", 0))
+            for name in names:
                 item = Path(root) / name
-                archive.write(item, item.relative_to(source.parent).as_posix())
+                entries.append((item, item.relative_to(source.parent).as_posix(), item.stat().st_size))
+
+    total = sum(size for _, _, size in entries)
+    processed = 0
+    report(on_progress, "压缩文件", 0, total)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED,
+                         allowZip64=True, strict_timestamps=False) as archive:
+        for item, name, planned_size in entries:
+            if item is None:
+                archive.writestr(name, b"")
+                continue
+            if item.is_symlink() or not item.is_file():
+                raise ValueError(f"不支持符号链接或特殊文件：{item}")
+            info = zipfile.ZipInfo.from_file(item, name, strict_timestamps=False)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            total += info.file_size - planned_size
+            expected_size = info.file_size
+            file_bytes = 0
+            with item.open("rb") as original, archive.open(
+                info, "w", force_zip64=info.file_size >= zipfile.ZIP64_LIMIT
+            ) as zipped:
+                while chunk := original.read(COPY_CHUNK_SIZE):
+                    zipped.write(chunk)
+                    file_bytes += len(chunk)
+                    processed += len(chunk)
+                    report(on_progress, "压缩文件", processed, max(total, processed), name)
+            total += file_bytes - expected_size
+    report(on_progress, "压缩文件", processed, processed, finished=True)
 
 
 def encrypt_path(
     path: str | Path, password: str, progress: Callable[[str], None] | None = None,
     output_dir: str | Path | None = None,
     part_size_mb: int = DEFAULT_PART_SIZE_MB,
+    *, files: list[str] | None = None, on_progress: Callable[[Progress], None] | None = None,
 ) -> Path:
     if type(part_size_mb) is not int or not 1 <= part_size_mb <= MAX_PART_SIZE_MB:
         raise ValueError(f"每个 TXT 上限必须是 1 到 {MAX_PART_SIZE_MB} 之间的整数 MB")
@@ -128,22 +216,29 @@ def encrypt_path(
     with tempfile.TemporaryDirectory(prefix=".ztxt-", dir=source.parent) as temporary:
         zip_path = Path(temporary) / "archive.zip"
         if progress:
-            progress("正在压缩文件…")
-        make_zip(source, zip_path)
-        count = max(1, (zip_path.stat().st_size + chunk_size - 1) // chunk_size)
+            progress("正在扫描并压缩文件…")
+        make_zip(source, zip_path, files, on_progress=on_progress)
+        zip_size = zip_path.stat().st_size
+        count = max(1, (zip_size + chunk_size - 1) // chunk_size)
         if count > 999_999:
             raise ValueError("分片数量超过 999999")
         output.mkdir()
         try:
             if progress:
                 progress("正在加密并生成 TXT 分片…")
+            report(on_progress, "加密生成 TXT", 0, zip_size)
+            processed = 0
             with zip_path.open("rb") as zipped:
                 for index in range(1, count + 1):
                     header = HEADER.pack(MAGIC, salt, archive_id, index, count)
                     nonce = archive_id + struct.pack(">I", index)
                     chunk = zipped.read(chunk_size)
                     encrypted = header + cipher.encrypt(nonce, chunk, header)
-                    (output / f"part-{index:06d}.txt").write_bytes(base64.b64encode(encrypted))
+                    name = f"part-{index:06d}.txt"
+                    (output / name).write_bytes(base64.b64encode(encrypted))
+                    processed += len(chunk)
+                    report(on_progress, "加密生成 TXT", processed, zip_size, name)
+            report(on_progress, "加密生成 TXT", processed, zip_size, finished=True)
         except BaseException:
             shutil.rmtree(output)
             raise
@@ -173,6 +268,7 @@ def check_zip(archive: zipfile.ZipFile) -> None:
 def decrypt_path(
     path: str | Path, password: str, progress: Callable[[str], None] | None = None,
     output_dir: str | Path | None = None,
+    *, on_progress: Callable[[Progress], None] | None = None,
 ) -> Path:
     if isinstance(path, str) and not path.strip():
         raise ValueError("路径不能为空")
@@ -198,11 +294,15 @@ def decrypt_path(
         cipher = None
         if progress:
             progress("正在校验并解密 TXT 分片…")
+        text_size = sum(part.stat().st_size for part in parts)
+        processed = 0
+        report(on_progress, "校验解密 TXT", 0, text_size)
         with zip_path.open("wb") as zipped:
             for index in range(1, len(parts) + 1):
                 part = parts_dir / f"part-{index:06d}.txt"
                 with part.open("rb") as stream:
                     encoded = stream.read(MAX_TEXT_LIMIT + 2)
+                read_size = len(encoded)
                 # 兼容文本保存时附加的单个末尾 NUL；Base64 内容仍受大小限制。
                 if encoded.endswith(b"\0"):
                     encoded = encoded[:-1]
@@ -227,14 +327,31 @@ def decrypt_path(
                     zipped.write(cipher.decrypt(archive_id + struct.pack(">I", index), data[HEADER.size :], header))
                 except InvalidTag as exc:
                     raise ValueError(f"密码错误或分片已损坏：{part.name}") from exc
+                processed += read_size
+                report(on_progress, "校验解密 TXT", processed, text_size, part.name)
+        report(on_progress, "校验解密 TXT", processed, processed, finished=True)
 
         with zipfile.ZipFile(zip_path) as archive:
             check_zip(archive)
             if progress:
                 progress("正在解压 ZIP…")
+            total = sum(info.file_size for info in archive.infolist())
+            processed = 0
+            report(on_progress, "解压文件", 0, total)
             output.mkdir()
             try:
-                archive.extractall(output)
+                for info in archive.infolist():
+                    target = output.joinpath(*PurePosixPath(info.filename).parts)
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info) as original, target.open("xb") as restored:
+                        while chunk := original.read(COPY_CHUNK_SIZE):
+                            restored.write(chunk)
+                            processed += len(chunk)
+                            report(on_progress, "解压文件", processed, total, info.filename)
+                report(on_progress, "解压文件", processed, total, finished=True)
             except BaseException:
                 shutil.rmtree(output)
                 raise
