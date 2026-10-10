@@ -9,5 +9,5 @@ RUN python3 -m venv /opt/venv
 RUN /opt/venv/bin/python -m pip install --no-cache-dir cryptography pyinstaller
 
 WORKDIR /src
-COPY zip_to_txt.py zip_to_txt_gui.py git_archive.py ./
+COPY zip_to_txt.py zip_to_txt_gui.py git_archive.py paste_restore.py ./
 RUN /opt/venv/bin/python -m PyInstaller --onefile --name zip-to-txt-gui zip_to_txt_gui.py

@@ -6,6 +6,7 @@ Git 测试包含真实 Tk 控件检查，需要系统 Git 和图形桌面。
 
 import gc
 import marshal
+import multiprocessing
 import runpy
 import sys
 import types
@@ -17,9 +18,14 @@ from PyInstaller.archive.readers import CArchiveReader
 def main():
     binary = Path(sys.argv[1])
     tests = sys.argv[2:]
+    if "--frozen-workers" in tests:
+        tests.remove("--frozen-workers")
+        # 让 spawn 真正启动发布可执行文件，而非构建 Python。
+        multiprocessing.set_executable(str(binary.resolve()))
+        sys.frozen = True
     archive = CArchiveReader(str(binary))
     pyz = archive.open_embedded_archive("PYZ.pyz")
-    for name in ("zip_to_txt", "git_archive", "zip_to_txt_gui"):
+    for name in ("zip_to_txt", "git_archive", "paste_restore", "zip_to_txt_gui"):
         module = types.ModuleType(name)
         module.__file__ = str(binary.parent / (name + ".py"))
         sys.modules[name] = module

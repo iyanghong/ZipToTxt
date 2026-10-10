@@ -103,6 +103,13 @@ def run_gui(base):
     root = tk.Tk()
     app = gui.App(root, config_path=config)
     messages, samples = [], []
+    show_progress = app.show_progress
+    def record_progress(value):
+        show_progress(value)
+        if app.busy and str(app.progress.cget("mode")) == "determinate":
+            samples.append((float(app.progress["value"]), app.byte_progress.get()))
+    # 在实际显示回调中采样，避免 update() 同一轮处理“进度”和“完成”后漏记。
+    app.show_progress = record_progress
 
     def wait_until(predicate):
         end = time.monotonic() + 30

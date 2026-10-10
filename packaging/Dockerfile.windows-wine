@@ -25,6 +25,6 @@ RUN xvfb-run -a wine /home/builder/.wine/drive_c/Python313/python.exe -m pip ins
     --no-index --find-links=Z:\\tmp\\windows-wheels cryptography pyinstaller
 
 WORKDIR /home/builder/src
-COPY --chown=builder:builder zip_to_txt.py zip_to_txt_gui.py git_archive.py ./
+COPY --chown=builder:builder zip_to_txt.py zip_to_txt_gui.py git_archive.py paste_restore.py ./
 RUN xvfb-run -a wine /home/builder/.wine/drive_c/Python313/python.exe -m PyInstaller \
     --onefile --windowed --name ZipToTxt zip_to_txt_gui.py

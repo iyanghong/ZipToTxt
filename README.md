@@ -4,21 +4,21 @@
 
 ## 下载图形版
 
-**v0.4.1**：Git 提交与文件清单改为上下排列，可拖动分隔线调整高度；长信息可查看、复制全文，并新增最近 24／48 小时筛选。保留浅色侧栏、独立用户列、各阶段真实字节进度、密码显隐、复制路径和设置记忆。
+**v0.5.0**：新增“粘贴文本还原”，每项对应一份完整 TXT 分片，可增加、替换或删除，自动检查缺片、重复及归档混杂。大文本读取、校验和还原在后台处理；保留 Git 提交选择、真实阶段进度、密码显隐、输出位置选择和设置记忆。
 
-该版本的发布页为 [ZipToTxt v0.4.1](https://github.com/iyanghong/ZipToTxt/releases/tag/v0.4.1)，下载地址如下：
+该版本的发布页为 [ZipToTxt v0.5.0](https://github.com/iyanghong/ZipToTxt/releases/tag/v0.5.0)，下载地址如下：
 
 | 系统 | 程序 | 运行方法 |
 | --- | --- | --- |
-| Windows x64 | [ZIP 包](https://github.com/iyanghong/ZipToTxt/releases/download/v0.4.1/zip-to-txt-windows-x86_64.zip) · [独立 EXE](https://github.com/iyanghong/ZipToTxt/releases/download/v0.4.1/ZipToTxt.exe) | 解压 ZIP 后双击 `ZipToTxt.exe`，或直接运行独立 EXE。 |
-| macOS Apple 芯片 | [ZIP 包](https://github.com/iyanghong/ZipToTxt/releases/download/v0.4.1/zip-to-txt-macos-arm64.zip) | 解压后打开 `ZipToTxt.app`。 |
-| Linux x64 | [tar.gz 包](https://github.com/iyanghong/ZipToTxt/releases/download/v0.4.1/zip-to-txt-linux-x86_64.tar.gz) | 解压后运行 `./zip-to-txt-gui`。 |
+| Windows x64 | [ZIP 包](https://github.com/iyanghong/ZipToTxt/releases/download/v0.5.0/zip-to-txt-windows-x86_64.zip) · [独立 EXE](https://github.com/iyanghong/ZipToTxt/releases/download/v0.5.0/ZipToTxt.exe) | 解压 ZIP 后双击 `ZipToTxt.exe`，或直接运行独立 EXE。 |
+| macOS Apple 芯片 | [ZIP 包](https://github.com/iyanghong/ZipToTxt/releases/download/v0.5.0/zip-to-txt-macos-arm64.zip) | 解压后打开 `ZipToTxt.app`。 |
+| Linux x64 | [tar.gz 包](https://github.com/iyanghong/ZipToTxt/releases/download/v0.5.0/zip-to-txt-linux-x86_64.tar.gz) | 解压后运行 `./zip-to-txt-gui`。 |
 
 这些程序已包含 Python、Tkinter 和加密依赖，目标机器无需安装 Python。Linux 版在 Ubuntu 22.04 构建，需要兼容的图形桌面和系统库。macOS 版仅做本地临时签名，Windows 版未签名；系统首次打开时可能要求手动允许运行。Windows 版由 Wine 构建，尚未在原生 Windows 上完成运行测试。
 
-[SHA-256 校验值](https://github.com/iyanghong/ZipToTxt/releases/download/v0.4.1/SHA256SUMS) 覆盖三个平台的压缩包和独立 Windows EXE。将四个文件放在同一目录，使用 `shasum -a 256 -c SHA256SUMS` 校验（Linux 也可使用 `sha256sum -c SHA256SUMS`）。
+[SHA-256 校验值](https://github.com/iyanghong/ZipToTxt/releases/download/v0.5.0/SHA256SUMS) 覆盖三个平台的压缩包和独立 Windows EXE。将四个文件放在同一目录，使用 `shasum -a 256 -c SHA256SUMS` 校验（Linux 也可使用 `sha256sum -c SHA256SUMS`）。
 
-本地产物保存在 `release/v0.4.1/`，`release/` 被 Git 忽略；二进制包通过 GitHub Releases 分发。详见[发布说明](docs/releases/v0.4.1.md)、[本次测试记录](docs/test-results-git-layout-2026-10-08.md)；历史版本可在 [Releases](https://github.com/iyanghong/ZipToTxt/releases) 查找。
+本地产物保存在 `release/v0.5.0/`，`release/` 被 Git 忽略；二进制包通过 GitHub Releases 分发。详见[发布说明](docs/releases/v0.5.0.md)、[本次测试记录](docs/test-results-paste-2026-10-10.md)；历史版本可在 [Releases](https://github.com/iyanghong/ZipToTxt/releases) 查找。
 
 ## 图形界面使用
 
@@ -62,6 +62,19 @@
 例如压缩 `C:\work\资料`，默认得到 `C:\work\资料.txtparts`；还原这个分片目录，默认得到 `C:\work\资料.txtparts\restored\资料`。目标输出目录已存在时程序会报错，不会覆盖。
 
 密码丢失、分片缺失或内容损坏时无法还原。单片上限设置得越大，处理时需要的内存越多。超过 50 MB 的分片须使用当前版本还原；旧版程序仍按 50 MB 拒绝。当前版本兼容 TXT 末尾意外附加的单个空字节（NUL），其余非法内容仍会报错。
+
+### 粘贴文本还原（v0.5.0 新增）
+
+1. 在侧栏选择“粘贴文本还原”。每个输入项放一份 TXT 的完整内容，可点击“添加分片”增加输入项。
+2. 复制 TXT 内容后，点击该项“粘贴”，或选中短预览框按 Ctrl+V（macOS 为 ⌘V）。去除空白后每片允许至 200 MB，ASCII 空格、制表符和 CR／LF 换行自动移除。文字说明或其他非法字符会报错。
+3. 粘贴后显示片号、大小和检查状态，可替换或删除。允许乱序粘贴；程序提示缺片、重复或混入其他归档。空输入项不计入分片。
+4. 收齐一套分片后，输入密码并选择已存在的输出目录，在其中新建 `restored`。可回填上次有效目录，同名目录已存在时会报错。
+
+读取剪贴板、校验及还原均由独立进程执行，窗口只显示短预览和进度，完整加密文本暂存到私有临时目录。粘贴时显示已读取大小；还原显示既有各阶段真实字节进度。成功后清空输入项，失败时保留以便重试；切换页面保留，关闭程序清理临时分片，文本与密码不会保存到设置文件。
+
+已用三份分别超过 100 MB、合计 346.77 MB 的真实剪贴板文本验证乱序粘贴和还原；测量范围及环境见[大文本测试记录](docs/test-results-paste-2026-10-10.md)。Windows 使用 Wine，Linux 使用 Xvfb，尚未完成原生 Windows／真实 Linux 桌面验收。
+
+![v0.5.0 实际粘贴还原页面](docs/images/ui-v0.5.0-paste.png)
 
 ### 进度与设置记忆
 
@@ -117,6 +130,8 @@ python test_git_archive.py
 python test_git_archive.py --gui  # 需要 Tkinter 和可用的图形桌面
 python test_gui_controls.py      # 日期与文件预览控件测试，不依赖 Git
 python test_ui_redesign.py       # 真实进度、侧栏、密码显隐、设置和错误清理
+python test_paste_restore.py     # 真实剪贴板、分片检查和失败重试
+python test_paste_restore.py --large  # 三份超过 100 MB 的文本、响应间隔及 GUI 内存采样
 ```
 
 ## 自行构建图形版
@@ -148,9 +163,10 @@ Windows 图形版在 Wine 9 中以桌面启动方式通过主窗口检查；从 
 
 ```sh
 python packaging/test_bundle.py "可执行文件路径" test_ui_redesign.py test_gui_controls.py test_git_picker_layout.py test_git_archive.py test_zip_to_txt.py
+python packaging/test_bundle.py "可执行文件路径" --frozen-workers test_paste_restore.py
 python packaging/test_compatibility.py "当前可执行文件路径" "v0.3.0 可执行文件路径"
 ```
 
-该检查验证包内应用代码；冻结程序的启动器和附带运行库还应单独进行实际启动检查。
+该检查验证包内应用代码；`--frozen-workers` 让后台进程实际启动指定的冻结可执行文件。设置环境变量 `ZTXT_PASTE_LARGE=1` 可运行大文本验收；冻结程序的主窗口启动器和附带运行库还应单独进行实际启动检查。
 
 仓库的 `packaging/Dockerfile.linux` 可用于 Linux x64 构建，`packaging/Dockerfile.windows-wine` 可用于 Wine 交叉构建 Windows x64 程序。各平台产物不能互换；Windows 构建仍需在原生 Windows 上验证。[完整测试记录](docs/test-results-2026-10-01.md)。

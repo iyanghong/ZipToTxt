@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """ZIP 文本归档的桌面界面。"""
 
+import multiprocessing
+from paste_restore import BackgroundJob, capture_worker, collection_status, restore_worker
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
 import calendar
 import json
 import os
@@ -843,6 +849,172 @@ class FilePreview:
         self.on_cancel()
 
 
+class PasteParts(ttk.Frame):
+    def __init__(self, parent, app):
+        super().__init__(parent, style="Card.TFrame", padding=18)
+        self.app, self.cards, self.counter = app, [], 0
+        self.temporary, self.job, self.active_card = None, None, None
+        self.columnconfigure(0, weight=1)
+        actions = ttk.Frame(self, style="Plain.TFrame")
+        actions.grid(row=0, column=0, sticky="ew")
+        ttk.Label(actions, text="粘贴文本分片", style="Section.TLabel").pack(side="left")
+        self.add_button = ttk.Button(actions, text="＋ 添加分片", command=self.add)
+        self.add_button.pack(side="right")
+        self.clear_button = ttk.Button(actions, text="清空全部", command=self.clear)
+        self.clear_button.pack(side="right", padx=8)
+        ttk.Label(self, text="每项粘贴一份 TXT 的完整内容，可乱序；空格和换行会自动移除。",
+                  style="CardMuted.TLabel", wraplength=620).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.summary = tk.StringVar()
+        self.summary_label = ttk.Label(self, textvariable=self.summary, style="Card.TLabel", wraplength=620)
+        self.summary_label.grid(row=2, column=0, sticky="w", pady=(8, 12))
+        self.body = ttk.Frame(self, style="Plain.TFrame")
+        self.body.grid(row=3, column=0, sticky="ew")
+        self.body.columnconfigure(0, weight=1)
+        self.add()
+
+    @property
+    def loading(self):
+        return self.job is not None
+
+    def parts(self):
+        return [card["info"] for card in self.cards if card["info"] is not None]
+
+    @property
+    def ready(self):
+        return not self.loading and not any(card["error"] for card in self.cards) and collection_status(self.parts())[0]
+
+    def add(self):
+        if self.loading or self.app.busy:
+            return
+        self.counter += 1
+        card = dict(number=self.counter, info=None, error="", generation=0)
+        frame = card["frame"] = ttk.Frame(self.body, style="Card.TFrame", padding=12)
+        frame.grid(row=len(self.cards), column=0, sticky="ew", pady=(0, 8))
+        frame.columnconfigure(0, weight=1)
+        card["title"] = tk.StringVar(value=f"输入项 {self.counter} · 尚未粘贴")
+        card["preview"] = tk.StringVar(value="选中这里按 Ctrl+V / ⌘V，或点击右侧“粘贴”")
+        card["status"] = tk.StringVar(value="只显示短预览，完整分片在后台处理")
+        ttk.Label(frame, textvariable=card["title"], style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        entry = card["entry"] = ttk.Entry(frame, textvariable=card["preview"], state="readonly", width=1)
+        entry.grid(row=1, column=0, sticky="ew", pady=(7, 6))
+        entry.bind("<<Paste>>", lambda _event: self.paste(card) or "break")
+        buttons = ttk.Frame(frame, style="Plain.TFrame")
+        buttons.grid(row=1, column=1, padx=(8, 0))
+        card["paste"] = ttk.Button(buttons, text="粘贴", command=lambda: self.paste(card))
+        card["paste"].pack(side="left")
+        card["delete"] = ttk.Button(buttons, text="删除", command=lambda: self.delete(card))
+        card["delete"].pack(side="left", padx=(6, 0))
+        card["status_label"] = ttk.Label(frame, textvariable=card["status"], style="CardMuted.TLabel", wraplength=540)
+        card["status_label"].grid(row=2, column=0, columnspan=2, sticky="w")
+        self.cards.append(card)
+        self.refresh()
+
+    def delete(self, card):
+        if self.loading or self.app.busy:
+            return
+        if card["info"]:
+            Path(card["info"]["path"]).unlink(missing_ok=True)
+        card["frame"].destroy()
+        self.cards.remove(card)
+        for row, remaining in enumerate(self.cards):
+            remaining["frame"].grid(row=row)
+        if not self.cards:
+            self.add()
+        self.refresh()
+
+    def clear(self):
+        if self.loading or self.app.busy:
+            return
+        for card in self.cards:
+            card["frame"].destroy()
+        self.cards.clear()
+        if self.temporary is not None:
+            self.temporary.cleanup()
+            self.temporary = None
+        self.add()
+
+    def paste(self, card):
+        if self.loading or self.app.busy:
+            return
+        self.app.reset_result()
+        self.app.status.set("正在读取和校验粘贴分片…")
+        self.app.progress.configure(mode="indeterminate")
+        self.app.progress.start(12)
+        self.app.progress_text.set("—")
+        self.app.byte_progress.set("正在读取剪贴板，完成后显示分片大小")
+        try:
+            if self.temporary is None:
+                self.temporary = tempfile.TemporaryDirectory(prefix=".ztxt-paste-")
+            card["generation"] += 1
+            destination = Path(self.temporary.name) / f"input-{card['number']}-{card['generation']}.txt"
+            self.job = BackgroundJob(capture_worker, str(destination))
+            self.active_card = card
+            card["status"].set("正在读取剪贴板并检查分片…")
+            card["status_label"].configure(foreground=MUTED)
+        except Exception as exc:
+            card["error"] = str(exc)
+            card["status"].set(card["error"])
+            self.app.progress.stop()
+            self.app.status.set("分片检查失败")
+        self.refresh()
+
+    def refresh(self):
+        ready, description = collection_status(self.parts())
+        errors = any(card["error"] for card in self.cards)
+        if self.loading:
+            description = "正在读取和校验粘贴内容，界面仍可响应…"
+        elif errors:
+            description = "有输入项未通过检查，请替换或删除对应项"
+        self.summary.set(description)
+        self.summary_label.configure(foreground="#16724b" if ready and not errors and not self.loading else MUTED)
+        self.set_enabled(not self.app.busy)
+        if hasattr(self.app, "run_button"):
+            self.app.refresh_paste_run()
+
+    def set_enabled(self, enabled):
+        state = "normal" if enabled and not self.loading else "disabled"
+        for control in (self.add_button, self.clear_button):
+            control.configure(state=state)
+        for card in self.cards:
+            card["paste"].configure(state=state)
+            card["delete"].configure(state=state)
+
+    def poll(self):
+        if self.job is None:
+            return
+        for event, value in self.job.poll():
+            card = self.active_card
+            if event == "bytes":
+                card["status"].set(f"已读取 {format_size(value)}，正在后台检查…")
+                self.app.byte_progress.set(f"已读取 {format_size(value)}，正在后台检查…")
+            elif event in ("done", "error"):
+                if event == "done":
+                    if card["info"]:
+                        Path(card["info"]["path"]).unlink(missing_ok=True)
+                    card["info"], card["error"] = value, ""
+                    card["title"].set(f"输入项 {card['number']} · 第 {value['index']} / {value['count']} 片 · {format_size(value['size'])}")
+                    card["preview"].set(value["preview"] + "…")
+                    card["status"].set("分片初步检查通过；还原时验证密码和数据完整性")
+                    card["status_label"].configure(foreground="#16724b")
+                    card["paste"].configure(text="替换")
+                else:
+                    card["error"] = value
+                    card["status"].set(value + ("；原分片保留" if card["info"] else ""))
+                    card["status_label"].configure(foreground="#b42318")
+                self.job, self.active_card = None, None
+                self.app.progress.stop()
+                self.app.progress.configure(mode="determinate", value=0)
+                self.app.progress_text.set("0%")
+                self.app.status.set("分片检查通过" if event == "done" else "分片检查失败")
+                self.app.byte_progress.set("收齐分片后可开始还原")
+                self.refresh()
+
+    def close(self):
+        if self.temporary is not None:
+            self.temporary.cleanup()
+            self.temporary = None
+
+
 class App:
     def __init__(self, root: tk.Tk, *, config_path=None):
         self.root, self.config_path = root, Path(config_path) if config_path is not None else preferences_path()
@@ -864,6 +1036,7 @@ class App:
         self.git_ready, self.git_generation, self.git_after = False, 0, None
         self.git_status = tk.StringVar(value="选择 Git 仓库中的目录可启用提交打包")
         self.pending_task, self.form_stacked = None, None
+        self.paste_job = None
 
         shell = ttk.Frame(root)
         shell.pack(fill="both", expand=True)
@@ -876,15 +1049,19 @@ class App:
                                          command=lambda: self.set_mode("encrypt"))
         self.decrypt_choice = ttk.Button(sidebar, text="解密并还原", style="Nav.TButton",
                                          command=lambda: self.set_mode("decrypt"))
+        self.paste_choice = ttk.Button(sidebar, text="粘贴文本还原", style="Nav.TButton",
+                                      command=lambda: self.set_mode("paste"))
         self.encrypt_choice.pack(fill="x", pady=(0, 8))
         self.decrypt_choice.pack(fill="x")
-        ttk.Label(sidebar, text="安全打包与还原\nv0.4.0", style="CardMuted.TLabel").pack(side="bottom", anchor="w")
+        self.paste_choice.pack(fill="x", pady=(8, 0))
+        ttk.Label(sidebar, text="安全打包与还原\nv0.5.0", style="CardMuted.TLabel").pack(side="bottom", anchor="w")
         main = ttk.Frame(shell, padding=(24, 22))
         main.grid(row=0, column=1, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)
         ttk.Label(main, textvariable=self.heading, style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(main, text="路径与参数分区展示，处理结果显示在下方。", style="Muted.TLabel").grid(
+        self.subheading = tk.StringVar(value="路径与参数分区展示，处理结果显示在下方。")
+        ttk.Label(main, textvariable=self.subheading, style="Muted.TLabel").grid(
             row=1, column=0, sticky="w", pady=(5, 18))
 
         form = ttk.Frame(main)
@@ -898,6 +1075,7 @@ class App:
         self.form_canvas.configure(yscrollcommand=self.form_scrollbar.set)
         self.form_body = ttk.Frame(self.form_canvas)
         self.form_window = self.form_canvas.create_window(0, 0, window=self.form_body, anchor="nw")
+        self.paste_parts = PasteParts(self.form_body, self)
         self.path_card = ttk.Frame(self.form_body, style="Card.TFrame", padding=18)
         self.options_card = ttk.Frame(self.form_body, style="Card.TFrame", padding=18)
         self.path_card.columnconfigure(0, weight=1)
@@ -927,9 +1105,11 @@ class App:
         self.git_description = ttk.Label(self.git_frame, textvariable=self.git_status,
                                          style="CardMuted.TLabel", wraplength=320)
         self.git_description.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.source_widgets = list(self.path_card.winfo_children())
         ttk.Label(self.path_card, text="输出位置", style="Section.TLabel").grid(
             row=6, column=0, sticky="w", pady=(16, 10))
-        ttk.Label(self.path_card, text="输出目录（可选）", style="Card.TLabel").grid(row=7, column=0, sticky="w")
+        self.output_label = ttk.Label(self.path_card, text="输出目录（可选）", style="Card.TLabel")
+        self.output_label.grid(row=7, column=0, sticky="w")
         destination = ttk.Frame(self.path_card, style="Plain.TFrame")
         destination.grid(row=8, column=0, sticky="ew", pady=(6, 0))
         destination.columnconfigure(0, weight=1)
@@ -1006,7 +1186,7 @@ class App:
         self.open_button.grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.copy_button.grid(row=1, column=1, sticky="e", pady=(8, 0))
         self.result_frame.grid_remove()
-        self.controls = [self.encrypt_choice, self.decrypt_choice, self.path_entry, self.file_button,
+        self.controls = [self.encrypt_choice, self.decrypt_choice, self.paste_choice, self.path_entry, self.file_button,
                          self.folder_button, self.output_dir_entry, self.output_dir_button, self.size_entry,
                          self.password_entry, self.confirm_entry, self.show_button, self.run_button,
                          self.git_button, self.complete_button]
@@ -1017,20 +1197,26 @@ class App:
         self.path_entry.focus_set()
         self.poll_id = root.after(80, self.poll)
 
-    def resize_form(self, event):
-        stacked = event.width < 700
+    def resize_form(self, event=None):
+        width = event.width if event is not None else self.form_canvas.winfo_width()
+        stacked = width < 700
+        pasting = self.mode.get() == "paste"
         if stacked != self.form_stacked:
             self.form_stacked = stacked
             self.form_body.columnconfigure(0, weight=1)
             self.form_body.columnconfigure(1, weight=0 if stacked else 1)
-            self.path_card.grid(row=0, column=0, sticky="nsew", padx=(0, 0 if stacked else 16),
+            self.path_card.grid(row=1 if pasting else 0, column=0, sticky="nsew", padx=(0, 0 if stacked else 16),
                                 pady=(0, 16 if stacked else 0))
-            self.options_card.grid(row=1 if stacked else 0, column=0 if stacked else 1, sticky="nsew")
-        self.form_canvas.itemconfigure(self.form_window, width=event.width)
-        wrap = max(180, (event.width if stacked else event.width // 2) - 52)
+            self.options_card.grid(row=(2 if stacked else 1) if pasting else (1 if stacked else 0),
+                                   column=0 if stacked else 1, sticky="nsew")
+        self.form_canvas.itemconfigure(self.form_window, width=width)
+        wrap = max(180, (width if stacked else width // 2) - 52)
         for label in (self.path_help, self.git_description, self.output_description):
             label.configure(wraplength=wrap)
-        self.file_progress_label.configure(wraplength=max(220, event.width - 32))
+        self.file_progress_label.configure(wraplength=max(220, width - 32))
+        self.paste_parts.summary_label.configure(wraplength=max(220, width - 48))
+        for card in self.paste_parts.cards:
+            card["status_label"].configure(wraplength=max(220, width - 80))
         self.update_scroll_region()
 
     def update_scroll_region(self):
@@ -1053,10 +1239,17 @@ class App:
 
     def update_mode(self):
         encrypting = self.mode.get() == "encrypt"
-        self.heading.set("新建归档包" if encrypting else "还原归档包")
+        pasting = self.mode.get() == "paste"
+        self.heading.set("粘贴文本还原" if pasting else ("新建归档包" if encrypting else "还原归档包"))
+        self.subheading.set("粘贴完整 TXT 分片，收齐后输入密码还原。" if pasting else "路径与参数分区展示，处理结果显示在下方。")
         self.source_label.set("要打包的文件或目录" if encrypting else "TXT 分片所在目录")
         self.encrypt_choice.state(["selected"] if encrypting else ["!selected"])
-        self.decrypt_choice.state(["!selected"] if encrypting else ["selected"])
+        self.decrypt_choice.state(["selected"] if self.mode.get() == "decrypt" else ["!selected"])
+        self.paste_choice.state(["selected"] if pasting else ["!selected"])
+        for control in self.source_widgets:
+            control.grid_remove() if pasting else control.grid()
+        self.paste_parts.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 16)) if pasting else self.paste_parts.grid_remove()
+        self.output_label.configure(text="输出目录（必选）" if pasting else "输出目录（可选）")
         self.options_heading.configure(text="分片与密码" if encrypting else "解密密码")
         self.file_button.configure(state="normal" if encrypting else "disabled")
         self.run_button.configure(text="压缩并加密" if encrypting else "解密并还原")
@@ -1064,12 +1257,23 @@ class App:
             control.grid() if encrypting else control.grid_remove()
         self.path_changed()
         self.update_output_hint()
+        self.form_stacked = None
+        self.resize_form()
+        self.refresh_paste_run()
+
+    def refresh_paste_run(self):
+        enabled = not self.busy and not self.paste_parts.loading
+        if self.mode.get() == "paste":
+            enabled = enabled and self.paste_parts.ready
+        self.run_button.configure(state="normal" if enabled else "disabled")
 
     def update_output_hint(self):
         path = self.path.get().strip()
         name = Path(path).name + ".txtparts" if path and self.mode.get() == "encrypt" else (
             "文件名.txtparts" if self.mode.get() == "encrypt" else "restored")
         self.output_hint.set(f"将在此位置新建 {name}。\n留空使用默认位置，已有目录不覆盖。")
+        if self.mode.get() == "paste":
+            self.output_hint.set("请选择输出位置，将在其中新建 restored。\n已有目录不覆盖。")
 
     def path_changed(self, *_args):
         self.git_generation += 1
@@ -1184,10 +1388,14 @@ class App:
         self.current_file.set("")
 
     def start(self):
-        if self.busy:
+        if self.busy or self.paste_parts.loading:
             return
         path, output_dir, password = self.path.get().strip(), self.output_dir.get().strip() or None, self.password.get()
-        if not path or not password:
+        pasting = self.mode.get() == "paste"
+        if pasting and (not self.paste_parts.ready or not output_dir or not password):
+            messagebox.showerror("无法开始", "请收齐一套分片、选择输出目录并输入密码", parent=self.root)
+            return
+        if not pasting and (not path or not password):
             messagebox.showerror("无法开始", "请选择路径并输入密码", parent=self.root)
             return
         encrypting = self.mode.get() == "encrypt"
@@ -1209,11 +1417,17 @@ class App:
         self.busy = True
         for control in self.controls:
             control.configure(state="disabled")
+        self.paste_parts.set_enabled(False)
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
         self.progress_text.set("—")
         self.status.set("正在准备…")
-        if encrypting and self.git_commits:
+        if pasting:
+            try:
+                self.paste_job = BackgroundJob(restore_worker, self.paste_parts.parts(), output_dir, password)
+            except Exception as exc:
+                self.events.put(("error", str(exc)))
+        elif encrypting and self.git_commits:
             self.pending_task = (path, password, options)
             commits = self.git_commits
             events = self.events
@@ -1286,8 +1500,18 @@ class App:
         self.git_button.configure(state="normal" if self.git_ready else "disabled")
         self.complete_button.configure(state="normal" if self.git_commits else "disabled")
         self.hide_password()
+        self.paste_parts.refresh()
 
     def poll(self):
+        self.paste_parts.poll()
+        if self.paste_job is not None:
+            for event, value in self.paste_job.poll():
+                if event == "progress":
+                    post_latest(self.progress_events, value)
+                else:
+                    self.events.put((event, value))
+            if self.paste_job.finished:
+                self.paste_job = None
         try:
             value = self.progress_events.get_nowait()
             if self.busy:
@@ -1323,6 +1547,8 @@ class App:
                 self.password.set("")
                 self.confirmation.set("")
                 if event == "done":
+                    if self.mode.get() == "paste":
+                        self.paste_parts.clear()
                     self.output.set(str(value))
                     self.status.set("处理完成")
                     self.status_label.configure(foreground="#16724b")
@@ -1362,9 +1588,10 @@ class App:
             messagebox.showerror("无法打开目录", str(exc), parent=self.root)
 
     def close(self):
-        if self.busy:
+        if self.busy or self.paste_parts.loading:
             messagebox.showinfo("正在处理", "请等待当前任务完成后关闭窗口", parent=self.root)
         else:
+            self.paste_parts.close()
             self.remember_settings()
             self.root.after_cancel(self.poll_id)
             if self.git_after is not None:
